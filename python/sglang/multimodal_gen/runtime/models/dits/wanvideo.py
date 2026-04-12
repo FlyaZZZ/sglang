@@ -65,11 +65,23 @@ _is_cuda = current_platform.is_cuda()
 
 class WanImageEmbedding(torch.nn.Module):
 
-    def __init__(self, in_features: int, out_features: int):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        quant_config: QuantizationConfig | None = None,
+    ):
         super().__init__()
 
         self.norm1 = FP32LayerNorm(in_features)
-        self.ff = MLP(in_features, in_features, out_features, act_type="gelu")
+        self.ff = MLP(
+            in_features,
+            in_features,
+            out_features,
+            act_type="gelu",
+            prefix="ff.net",
+            quant_config=quant_config,
+        )
         self.norm2 = FP32LayerNorm(out_features)
 
     def forward(self, encoder_hidden_states_image: torch.Tensor) -> torch.Tensor:
@@ -88,20 +100,41 @@ class WanTimeTextImageEmbedding(nn.Module):
         time_freq_dim: int,
         text_embed_dim: int,
         image_embed_dim: int | None = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
 
         self.time_embedder = TimestepEmbedder(
-            dim, frequency_embedding_size=time_freq_dim, act_layer="silu"
+            dim,
+            frequency_embedding_size=time_freq_dim,
+            act_layer="silu",
+            prefix="time_embedder",
+            quant_config=quant_config,
         )
-        self.time_modulation = ModulateProjection(dim, factor=6, act_layer="silu")
+        self.time_modulation = ModulateProjection(
+            dim,
+            factor=6,
+            act_layer="silu",
+            prefix="time_modulation",
+            quant_config=quant_config,
+        )
         self.text_embedder = MLP(
-            text_embed_dim, dim, dim, bias=True, act_type="gelu_pytorch_tanh"
+            text_embed_dim,
+            dim,
+            dim,
+            bias=True,
+            act_type="gelu_pytorch_tanh",
+            prefix="text_embedder",
+            quant_config=quant_config,
         )
 
         self.image_embedder = None
         if image_embed_dim is not None:
-            self.image_embedder = WanImageEmbedding(image_embed_dim, dim)
+            self.image_embedder = WanImageEmbedding(
+                image_embed_dim,
+                dim,
+                quant_config=quant_config,
+            )
 
     def forward(
         self,
@@ -222,13 +255,12 @@ class WanT2VCrossAttention(WanSelfAttention):
         q = q.unflatten(2, (self.local_num_heads, self.head_dim))
 
         k, _ = self.to_k(context)
+        v, _ = self.to_v(context)
         if self.tp_rmsnorm:
             k = tensor_parallel_rms_norm(k, self.norm_k)
         else:
             k = self.norm_k(k)
         k = k.unflatten(2, (self.local_num_heads, self.head_dim))
-
-        v, _ = self.to_v(context)
         v = v.unflatten(2, (self.local_num_heads, self.head_dim))
 
         # compute attention
@@ -850,6 +882,7 @@ class WanTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             time_freq_dim=config.freq_dim,
             text_embed_dim=config.text_dim,
             image_embed_dim=config.image_dim,
+            quant_config=quant_config,
         )
 
         # 3. Transformer blocks

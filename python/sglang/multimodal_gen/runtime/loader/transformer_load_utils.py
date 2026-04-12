@@ -10,7 +10,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import torch
 from torch import nn
@@ -19,9 +19,15 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.nunchaku_config i
     NunchakuConfig,
     _patch_nunchaku_scales,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.configs.sharq_config import (
+    SharQConfig,
+)
 from sglang.multimodal_gen.runtime.loader.utils import _list_safetensors_files
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
-from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import maybe_download_model
+from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
+    get_diffusers_component_config,
+    maybe_download_model,
+)
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.quantization_utils import (
     build_nvfp4_config_from_safetensors_list,
@@ -105,6 +111,38 @@ class _NunchakuQuantAdapter(_TransformerQuantAdapter):
         return [partial(_patch_nunchaku_scales, safetensors_list=self.safetensors_list)]
 
 
+class _SharQQuantAdapter(_TransformerQuantAdapter):
+    """Adapter for SharQ override checkpoints."""
+
+    def __init__(
+        self,
+        *,
+        sharq_config: SharQConfig,
+        server_args: ServerArgs,
+        model_cls: type[nn.Module],
+    ) -> None:
+        self.sharq_config = sharq_config
+        self.server_args = server_args
+        self.model_cls = model_cls
+
+    def prepare(self) -> None:
+        pipeline_name = (
+            self.server_args.model_id
+            or os.path.basename(self.server_args.model_path or "")
+            or self.server_args.pipeline_config.__class__.__name__
+        )
+        self.sharq_config.validate_runtime(
+            model_cls_name=self.model_cls.__name__,
+            pipeline_name=pipeline_name,
+            tp_size=self.server_args.tp_size,
+        )
+        logger.info(
+            "Resolved SharQ quantization for %s with override weights at %s",
+            pipeline_name,
+            self.server_args.transformer_weights_path,
+        )
+
+
 class _Flux2Nvfp4FallbackAdapter(_TransformerQuantAdapter):
     """Adapter for black-forest-labs/FLUX.2-dev-NVFP4"""
 
@@ -156,14 +194,48 @@ class _Flux2Nvfp4FallbackAdapter(_TransformerQuantAdapter):
         )
 
 
+def resolve_transformer_override_path(
+    server_args: ServerArgs, component_model_path: str
+) -> str | None:
+    """Resolve the effective override path for the current transformer component.
+
+    If ``--transformer-weights-path`` points at a root directory that contains
+    component subdirectories such as ``transformer/`` and ``transformer_2/``,
+    prefer the subdirectory matching the component currently being loaded.
+    Otherwise, keep the original path for single-component checkpoints.
+    """
+    quantized_path = server_args.transformer_weights_path
+    if not quantized_path:
+        return None
+
+    quantized_path = maybe_download_model(quantized_path)
+    if not os.path.isdir(quantized_path):
+        return quantized_path
+
+    component_dir_name = os.path.basename(os.path.normpath(component_model_path))
+    component_override_path = os.path.join(quantized_path, component_dir_name)
+    if os.path.isdir(component_override_path):
+        return component_override_path
+    return quantized_path
+
+
+def resolve_transformer_component_config(
+    server_args: ServerArgs, component_model_path: str
+) -> dict[str, Any]:
+    """Load transformer config from the override dir when present, else base."""
+    override_path = resolve_transformer_override_path(server_args, component_model_path)
+    if override_path and os.path.isdir(override_path):
+        return get_diffusers_component_config(component_path=override_path)
+    return get_diffusers_component_config(component_path=component_model_path)
+
+
 def resolve_transformer_safetensors_to_load(
     server_args: ServerArgs, component_model_path: str
 ) -> list[str]:
     """Resolve transformer weights from the base component path or an override."""
-    quantized_path = server_args.transformer_weights_path
+    quantized_path = resolve_transformer_override_path(server_args, component_model_path)
 
     if quantized_path:
-        quantized_path = maybe_download_model(quantized_path)
         logger.info("using quantized transformer weights from: %s", quantized_path)
         if os.path.isfile(quantized_path) and quantized_path.endswith(".safetensors"):
             safetensors_list = [quantized_path]
@@ -253,6 +325,14 @@ def _build_transformer_quant_adapters(
                 safetensors_list=safetensors_list,
             )
         )
+    if isinstance(quant_config, SharQConfig):
+        adapters.append(
+            _SharQQuantAdapter(
+                sharq_config=quant_config,
+                server_args=server_args,
+                model_cls=model_cls,
+            )
+        )
     return adapters
 
 
@@ -264,8 +344,10 @@ def _resolve_quant_config(
     component_model_path: str,
 ) -> Optional[QuantizationConfig]:
     """
-    resolve quant config from checkpoints' metadata
-    priority: model config.json -> safetensors metadata -> format-specific fallback
+    Resolve quant config from the selected component config, checkpoint metadata,
+    or format-specific fallback.
+    Priority: override-dir config.json when present, otherwise base config.json
+    -> safetensors metadata -> format-specific fallback.
     """
     quant_config = get_quant_config(hf_config, component_model_path)
     if quant_config is None and server_args.transformer_weights_path:

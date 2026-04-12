@@ -5,13 +5,16 @@ from typing import Literal, get_args
 from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
     QuantizationConfig,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.configs.sharq_config import (
+    SharQConfig,
+)
 from sglang.multimodal_gen.runtime.layers.quantization.fp8 import Fp8Config
 from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
     ModelOptFp4Config,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.modelslim import ModelSlimConfig
 
-QuantizationMethods = Literal["fp8", "modelopt_fp4", "modelslim"]
+QuantizationMethods = Literal["fp8", "modelopt_fp4", "modelslim", "sharq"]
 
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -20,6 +23,7 @@ _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {
     "modelopt_fp4": ModelOptFp4Config,
     "modelslim": ModelSlimConfig,
     "fp8": Fp8Config,
+    "sharq": SharQConfig,
 }
 
 
@@ -60,7 +64,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
 
     return method_to_config[quantization]
-
 
 __all__ = [
     "QuantizationMethods",

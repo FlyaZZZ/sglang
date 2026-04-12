@@ -9,15 +9,13 @@ from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader imp
 )
 from sglang.multimodal_gen.runtime.loader.fsdp_load import maybe_load_fsdp_model
 from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
+    resolve_transformer_component_config,
     resolve_transformer_quant_load_spec,
     resolve_transformer_safetensors_to_load,
 )
 from sglang.multimodal_gen.runtime.loader.utils import _normalize_component_type
 from sglang.multimodal_gen.runtime.models.registry import ModelRegistry
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
-from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
-    get_diffusers_component_config,
-)
 from sglang.multimodal_gen.runtime.utils.logging_utils import get_log_level, init_logger
 from sglang.srt.utils import is_npu
 
@@ -37,7 +35,9 @@ class TransformerLoader(ComponentLoader):
     ):
         """Load the transformer based on the model path, and inference args."""
         # 1. hf config
-        config = get_diffusers_component_config(component_path=component_model_path)
+        config = resolve_transformer_component_config(
+            server_args, component_model_path
+        )
 
         safetensors_list = resolve_transformer_safetensors_to_load(
             server_args, component_model_path

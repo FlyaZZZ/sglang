@@ -27,7 +27,11 @@ from sglang.jit_kernel.timestep_embedding import (
 from sglang.multimodal_gen.runtime.layers.activation import get_act_fn
 from sglang.multimodal_gen.runtime.layers.linear import ColumnParallelLinear
 from sglang.multimodal_gen.runtime.layers.mlp import MLP
+from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
+    QuantizationConfig,
+)
 from sglang.multimodal_gen.runtime.platforms import current_platform
+from sglang.srt.utils import add_prefix
 
 _is_cuda = current_platform.is_cuda()
 
@@ -159,6 +163,7 @@ class TimestepEmbedder(nn.Module):
         dtype=None,
         freq_dtype=torch.float32,
         prefix: str = "",
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.frequency_embedding_size = frequency_embedding_size
@@ -170,15 +175,26 @@ class TimestepEmbedder(nn.Module):
             hidden_size,
             act_type=act_layer,
             dtype=dtype,
+            prefix=add_prefix("mlp", prefix),
+            quant_config=quant_config,
         )
         self.freq_dtype = freq_dtype
+
+    def _projection_dtype(self) -> torch.dtype:
+        weight = getattr(self.mlp.fc_in, "weight", None)
+        if weight is not None:
+            return weight.dtype
+        bias = getattr(self.mlp.fc_in, "bias", None)
+        if bias is not None:
+            return bias.dtype
+        return self.mlp.fc_in.params_dtype
 
     def forward(
         self, t: torch.Tensor, timestep_seq_len: int | None = None
     ) -> torch.Tensor:
         t_freq = timestep_embedding(
             t, self.frequency_embedding_size, self.max_period, dtype=self.freq_dtype
-        ).to(self.mlp.fc_in.weight.dtype)
+        ).to(self._projection_dtype())
         if timestep_seq_len is not None:
             assert (
                 t_freq.shape[0] % timestep_seq_len == 0
@@ -230,6 +246,7 @@ class ModulateProjection(nn.Module):
         act_layer: str = "silu",
         dtype: torch.dtype | None = None,
         prefix: str = "",
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.factor = factor
@@ -240,6 +257,8 @@ class ModulateProjection(nn.Module):
             bias=True,
             gather_output=True,
             params_dtype=dtype,
+            quant_config=quant_config,
+            prefix=add_prefix("linear", prefix),
         )
         self.act = get_act_fn(act_layer)
 

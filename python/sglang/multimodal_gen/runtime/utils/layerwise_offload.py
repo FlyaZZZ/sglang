@@ -10,6 +10,29 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 
+_CUDA_TENSOR_ALIGNMENT_BYTES = 32
+
+
+def _align_numel_offset(
+    offset: int,
+    dtype: torch.dtype,
+    alignment_bytes: int = _CUDA_TENSOR_ALIGNMENT_BYTES,
+) -> int:
+    """Round a flat tensor offset up so the byte address keeps CUDA-kernel alignment.
+
+    Layerwise offload restores parameters as views into one consolidated buffer.
+    Some CuTeDSL kernels require every tensor argument to start at a 32-byte
+    aligned address, so we pad the per-dtype flat buffer between tensors.
+    """
+    element_size = torch.tensor([], dtype=dtype).element_size()
+    if element_size <= 0:
+        return offset
+    alignment_elems = max(1, alignment_bytes // element_size)
+    remainder = offset % alignment_elems
+    if remainder == 0:
+        return offset
+    return offset + (alignment_elems - remainder)
+
 
 # Adapted from skywork AI Infra diffusion optimize
 class LayerwiseOffloadManager:
@@ -113,7 +136,13 @@ class LayerwiseOffloadManager:
             self._weight_metadata[layer_idx] = {}
 
             for dtype, weights in dtype_to_params.items():
-                total_numel = sum(t.numel() for _, t in weights)
+                current_offset = 0
+                layout: list[tuple[str, torch.Tensor, int]] = []
+                for name, weight in weights:
+                    current_offset = _align_numel_offset(current_offset, dtype)
+                    layout.append((name, weight, current_offset))
+                    current_offset += weight.numel()
+                total_numel = current_offset
 
                 # create concatenated CPU buffer (in pinned memory)
                 cpu_buffer = torch.empty(
@@ -121,8 +150,7 @@ class LayerwiseOffloadManager:
                 )
 
                 # offload weights to the buffer
-                current_offset = 0
-                for name, weight in weights:
+                for name, weight, current_offset in layout:
                     numel = weight.numel()
                     cpu_buffer[current_offset : current_offset + numel].copy_(
                         weight.flatten()
@@ -135,8 +163,6 @@ class LayerwiseOffloadManager:
                     }
 
                     weight.data = self._get_shared_empty_tensor(dtype)
-
-                    current_offset += numel
 
                 self._consolidated_cpu_weights[layer_idx][dtype] = cpu_buffer
 

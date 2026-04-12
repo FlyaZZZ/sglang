@@ -45,6 +45,7 @@ backend.
 | `fp8`            | Quantized transformer component folder, or safetensors with `quantization_config` metadata | `--transformer-path` or `--transformer-weights-path` | ALL                                                          | None                                  | Component-folder and single-file flows are both supported                                                             |
 | `nvfp4-modelopt` | NVFP4 safetensors file, sharded directory, or repo providing transformer weights           | `--transformer-weights-path`                         | FLUX.2                                                       | `comfy-kitchen` optional on Blackwell | Blackwell can use a best-performance kit when available; otherwise SGLang falls back to the generic ModelOpt FP4 path |
 | `nunchaku-svdq`  | Pre-quantized Nunchaku transformer weights, usually named `svdq-{int4\|fp4}_r{rank}-...`   | `--transformer-weights-path`                         | Model-specific support such as Qwen-Image, FLUX, and Z-Image | `nunchaku`                            | SGLang can infer precision and rank from the filename and supports both `int4` and `nvfp4`                            |
+| `sharq`          | Offline-exported transformer directory with `config.json` and `quantization_config.json`   | `--transformer-weights-path`                         | Wan2.2-T2V-A14B                                              | built `sharq_ops`                     | Blackwell-only, `tp_size == 1`, milestone one uses a directory export rather than a single safetensors file          |
 | `msmodelslim`    | Pre-quantized msmodelslim transformer weights                                              | `--model-path`                                       | Wan2.2 family                                                | None                                  | Currently only compatible with the Ascend NPU family and supports both `w8a8` and `w4a4`                              |
 
 ## NVFP4
@@ -172,6 +173,83 @@ sglang generate \
   as `4` or `8`.
 - Current runtime validation only allows Nunchaku on NVIDIA CUDA Ampere (SM8x)
   or SM12x GPUs. Hopper (SM90) is currently rejected.
+
+## SharQ
+
+### Install
+
+Build the external SharQ runtime first and point SGLang at the resulting
+extension if it is not importable from your Python environment:
+
+```bash
+cmake -S /data/SharQ/kernels -B /data/SharQ/kernels/build_cmake_sm120a \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+  -DPython3_EXECUTABLE=$(which python)
+cmake --build /data/SharQ/kernels/build_cmake_sm120a --target sharq_ops -j
+
+export SGLANG_SHARQ_OPS_PATH=/data/SharQ/kernels/build_cmake_sm120a
+```
+
+### Export
+
+For `Wan2.2-T2V-A14B`, export from the model root so both `transformer` and
+`transformer_2` are converted together:
+
+```bash
+python -m sglang.multimodal_gen.tools.convert_wan_to_sharq \
+  --input-model-path /path/to/Wan2.2-T2V-A14B-Diffusers \
+  --output-dir /path/to/Wan2.2-T2V-A14B-SHARQ
+```
+
+This writes one SharQ checkpoint directory per component:
+
+- `/path/to/Wan2.2-T2V-A14B-SHARQ/transformer`
+- `/path/to/Wan2.2-T2V-A14B-SHARQ/transformer_2`
+
+Each component directory contains:
+
+- `config.json`
+- `quantization_config.json`
+- `diffusion_pytorch_model.safetensors`
+
+If you only need a single component, the exporter still supports:
+
+```bash
+python -m sglang.multimodal_gen.tools.convert_wan_to_sharq \
+  --input-transformer /path/to/Wan2.2-T2V-A14B-Diffusers/transformer \
+  --output-dir /path/to/Wan2.2-T2V-A14B-SHARQ/transformer
+```
+
+Do not mix a root-level single-component export with stale `transformer/` or
+`transformer_2/` subdirectories under the same output root. When serving the
+full Wan model, re-export from `--input-model-path` so both component
+subdirectories are regenerated together.
+
+### Usage
+
+Keep the base model and SharQ transformer override separate:
+
+```bash
+sglang generate \
+  --model-path Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+  --transformer-weights-path /path/to/Wan2.2-T2V-A14B-SHARQ \
+  --tp-size 1 \
+  --prompt "a dolphin jumping over moonlit waves" \
+  --save-output
+```
+
+When `--transformer-weights-path` points at the root export directory, SGLang
+will automatically route `transformer` and `transformer_2` to their matching
+subdirectories.
+
+### Notes
+
+- SharQ milestone one supports `Wan2.2-T2V-A14B` only.
+- Runtime validation currently requires NVIDIA CUDA Blackwell-class GPUs.
+- Runtime validation currently requires `tp_size == 1`.
+- The current Wan integration keeps attention projections split and quantizes
+  `to_q`, `to_k`, and `to_v` separately.
 
 ## [ModelSlim](https://gitcode.com/Ascend/msmodelslim)
 MindStudio-ModelSlim (msModelSlim) is a model offline quantization compression tool launched by MindStudio and optimized for Ascend hardware.
