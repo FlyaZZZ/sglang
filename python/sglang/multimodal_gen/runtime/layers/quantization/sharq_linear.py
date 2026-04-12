@@ -7,8 +7,9 @@ from torch.nn.parameter import Parameter
 
 from sglang.multimodal_gen.runtime.layers.linear import LinearMethodBase
 from sglang.multimodal_gen.runtime.layers.quantization.sharq_ops import (
+    dense_scale_buffer_numel,
     load_sharq_ops,
-    scale_buffer_numel,
+    sparse_scale_buffer_numel,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.sharq_prepare import (
     prepare_sharq_activation,
@@ -49,7 +50,10 @@ class SharQLinearMethod(LinearMethodBase):
             )
 
         output_size_per_partition = sum(output_partition_sizes)
-        scale_numel = scale_buffer_numel(
+        sparse_scale_numel = sparse_scale_buffer_numel(
+            output_size_per_partition, input_size_per_partition
+        )
+        dense_scale_numel = dense_scale_buffer_numel(
             output_size_per_partition, input_size_per_partition
         )
 
@@ -62,10 +66,10 @@ class SharQLinearMethod(LinearMethodBase):
             requires_grad=False,
         )
         sfw_sparse = Parameter(
-            torch.empty(scale_numel, dtype=torch.uint8), requires_grad=False
+            torch.empty(sparse_scale_numel, dtype=torch.uint8), requires_grad=False
         )
         sfw_dense = Parameter(
-            torch.empty(scale_numel, dtype=torch.uint8), requires_grad=False
+            torch.empty(dense_scale_numel, dtype=torch.uint8), requires_grad=False
         )
         weight_scale = Parameter(
             torch.empty(1, dtype=torch.float32), requires_grad=False
@@ -78,7 +82,9 @@ class SharQLinearMethod(LinearMethodBase):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
 
-        weight_loader = extra_weight_attrs.get("weight_loader", _copy_tensor_param)
+        # SharQ milestone one only supports tp_size == 1, so quantized tensors
+        # should be copied as-is instead of going through the generic TP sharder.
+        weight_loader = _copy_tensor_param
         set_weight_attrs(
             qweight,
             {

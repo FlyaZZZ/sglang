@@ -17,7 +17,8 @@ from sglang.multimodal_gen.runtime.layers.quantization.sharq_linear import (
     SharQLinearMethod,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.sharq_ops import (
-    scale_buffer_numel,
+    dense_scale_buffer_numel,
+    sparse_scale_buffer_numel,
 )
 from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
     resolve_transformer_component_config,
@@ -135,11 +136,14 @@ class TestWanSharQExporter(unittest.TestCase):
 
         def fake_quantize(weight: torch.Tensor, bias: torch.Tensor | None):
             rows, cols = weight.shape
-            scale_numel = scale_buffer_numel(rows, cols)
             payload = {
                 "qweight": torch.zeros((rows, cols // 2), dtype=torch.uint8),
-                "sfw_sparse": torch.zeros(scale_numel, dtype=torch.uint8),
-                "sfw_dense": torch.zeros(scale_numel, dtype=torch.uint8),
+                "sfw_sparse": torch.zeros(
+                    sparse_scale_buffer_numel(rows, cols), dtype=torch.uint8
+                ),
+                "sfw_dense": torch.zeros(
+                    dense_scale_buffer_numel(rows, cols), dtype=torch.uint8
+                ),
                 "weight_scale": torch.tensor([0.25], dtype=torch.float32),
             }
             if bias is not None:
@@ -184,11 +188,14 @@ class TestWanSharQExporter(unittest.TestCase):
     def test_export_wan_model_to_sharq_writes_transformer_pair(self):
         def fake_quantize(weight: torch.Tensor, bias: torch.Tensor | None):
             rows, cols = weight.shape
-            scale_numel = scale_buffer_numel(rows, cols)
             payload = {
                 "qweight": torch.zeros((rows, cols // 2), dtype=torch.uint8),
-                "sfw_sparse": torch.zeros(scale_numel, dtype=torch.uint8),
-                "sfw_dense": torch.zeros(scale_numel, dtype=torch.uint8),
+                "sfw_sparse": torch.zeros(
+                    sparse_scale_buffer_numel(rows, cols), dtype=torch.uint8
+                ),
+                "sfw_dense": torch.zeros(
+                    dense_scale_buffer_numel(rows, cols), dtype=torch.uint8
+                ),
                 "weight_scale": torch.tensor([0.5], dtype=torch.float32),
             }
             if bias is not None:

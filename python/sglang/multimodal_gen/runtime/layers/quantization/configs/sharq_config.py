@@ -50,7 +50,7 @@ class SharQConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 120
+        return 100
 
     @staticmethod
     def get_config_filenames() -> list[str]:

@@ -80,13 +80,25 @@ def global_nvfp4_scale(x):
     return torch.clamp(x.abs().max().float() / (448.0 * 6.0), min=1e-9)
 
 
+def sparse_scale_buffer_numel(num_rows: int, k_dim: int) -> int:
+    padded_rows = ((num_rows + 127) // 128) * 128
+    return padded_rows * k_dim // 32
+
+
+def dense_scale_buffer_numel(num_rows: int, k_dim: int) -> int:
+    padded_rows = ((num_rows + 127) // 128) * 128
+    return padded_rows * k_dim // 16
+
+
 def scale_buffer_numel(num_rows: int, k_dim: int) -> int:
-    return ((num_rows // 128) + 1) * 128 * k_dim // 16
+    return dense_scale_buffer_numel(num_rows, k_dim)
 
 
 __all__ = [
+    "dense_scale_buffer_numel",
     "global_nvfp4_scale",
     "is_sharq_available",
     "load_sharq_ops",
     "scale_buffer_numel",
+    "sparse_scale_buffer_numel",
 ]

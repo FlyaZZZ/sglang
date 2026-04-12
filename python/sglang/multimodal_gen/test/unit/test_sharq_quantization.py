@@ -13,6 +13,10 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.sharq_config impo
 from sglang.multimodal_gen.runtime.layers.quantization.sharq_linear import (
     SharQLinearMethod,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.sharq_ops import (
+    dense_scale_buffer_numel,
+    sparse_scale_buffer_numel,
+)
 from sglang.multimodal_gen.runtime.layers.quantization.sharq_prepare import (
     SharQPreparedActivation,
     prepare_sharq_activation,
@@ -150,6 +154,44 @@ class TestSharQLinearMethod(unittest.TestCase):
         self.assertEqual(layer.sfw_sparse.missing_param_init, "zeros")
         self.assertEqual(layer.sfw_dense.missing_param_init, "zeros")
         self.assertEqual(layer.weight_scale.missing_param_init, "ones")
+
+    def test_create_weights_matches_exported_sparse_and_dense_shapes(self):
+        layer = torch.nn.Module()
+        method = SharQLinearMethod(SharQConfig())
+
+        method.create_weights(
+            layer,
+            input_size_per_partition=5120,
+            output_partition_sizes=[5120],
+            input_size=5120,
+            output_size=5120,
+            params_dtype=torch.bfloat16,
+        )
+
+        self.assertEqual(
+            layer.sfw_sparse.numel(), sparse_scale_buffer_numel(5120, 5120)
+        )
+        self.assertEqual(
+            layer.sfw_dense.numel(), dense_scale_buffer_numel(5120, 5120)
+        )
+        self.assertLess(layer.sfw_sparse.numel(), layer.sfw_dense.numel())
+
+    def test_sparse_scale_shape_pads_small_row_counts_to_one_block(self):
+        layer = torch.nn.Module()
+        method = SharQLinearMethod(SharQConfig())
+
+        method.create_weights(
+            layer,
+            input_size_per_partition=5120,
+            output_partition_sizes=[64],
+            input_size=5120,
+            output_size=64,
+            params_dtype=torch.bfloat16,
+        )
+
+        self.assertEqual(layer.sfw_sparse.numel(), sparse_scale_buffer_numel(64, 5120))
+        self.assertEqual(layer.sfw_dense.numel(), dense_scale_buffer_numel(64, 5120))
+        self.assertEqual(layer.sfw_sparse.numel(), 20480)
 
     def test_apply_uses_kernel_prepare_contract(self):
         class FakeSharQOps:
