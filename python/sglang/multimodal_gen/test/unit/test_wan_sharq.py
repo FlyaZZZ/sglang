@@ -26,6 +26,7 @@ from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
     resolve_transformer_safetensors_to_load,
 )
 from sglang.multimodal_gen.tools.convert_wan_to_sharq import (
+    DEFAULT_EXCLUDED_MODULE_PATTERNS,
     export_wan_model_to_sharq,
     export_wan_to_sharq,
 )
@@ -152,19 +153,25 @@ class TestWanSharQExporter(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             out_dir = Path(tmpdir) / "out"
-            export_wan_to_sharq(
+            result = export_wan_to_sharq(
                 state_dict=state_dict,
                 output_dir=str(out_dir),
                 target_pipeline="Wan2.2-T2V-A14B",
                 config={"_class_name": "WanTransformer3DModel"},
                 quantize_weight_fn=fake_quantize,
+                excluded_module_patterns=(),
             )
+
+            self.assertIn("blocks.0.attn2.to_k", result.quantized_modules)
+            self.assertIn("blocks.0.attn2.to_v", result.quantized_modules)
+            self.assertEqual(result.skipped_modules, ())
 
             with open(out_dir / "config.json", "r") as f:
                 config = json.load(f)
             self.assertEqual(config["_class_name"], "WanTransformer3DModel")
             self.assertEqual(config["quantization_config"]["quant_method"], "sharq")
             self.assertEqual(config["quantization_config"]["fused_modules"], [])
+            self.assertEqual(config["quantization_config"]["modules_to_not_convert"], [])
 
             with safe_open(
                 str(out_dir / "diffusion_pytorch_model.safetensors"),
@@ -184,6 +191,101 @@ class TestWanSharQExporter(unittest.TestCase):
                     tuple(f.get_tensor("blocks.0.attn1.to_q.qweight").shape),
                     (128, 64),
                 )
+
+    def test_export_wan_to_sharq_uses_default_excluded_modules(self):
+        state_dict = {
+            "blocks.0.attn1.to_q.weight": torch.ones((128, 128), dtype=torch.bfloat16),
+            "blocks.0.attn2.to_q.weight": torch.full(
+                (128, 128), 1.5, dtype=torch.bfloat16
+            ),
+            "blocks.0.attn2.to_k.weight": torch.full(
+                (128, 128), 2.0, dtype=torch.bfloat16
+            ),
+            "blocks.0.attn2.to_v.weight": torch.full(
+                (128, 128), 2.5, dtype=torch.bfloat16
+            ),
+            "condition_embedder.time_proj.weight": torch.full(
+                (256, 128), 3.0, dtype=torch.bfloat16
+            ),
+            "proj_out.weight": torch.full((64, 128), 4.0, dtype=torch.bfloat16),
+        }
+
+        def fake_quantize(weight: torch.Tensor, bias: torch.Tensor | None):
+            rows, cols = weight.shape
+            payload = {
+                "qweight": torch.zeros((rows, cols // 2), dtype=torch.uint8),
+                "sfw_sparse": torch.zeros(
+                    sparse_scale_buffer_numel(rows, cols), dtype=torch.uint8
+                ),
+                "sfw_dense": torch.zeros(
+                    dense_scale_buffer_numel(rows, cols), dtype=torch.uint8
+                ),
+                "weight_scale": torch.tensor([0.75], dtype=torch.float32),
+            }
+            if bias is not None:
+                payload["bias"] = bias.clone()
+            return payload
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir) / "out"
+            result = export_wan_to_sharq(
+                state_dict=state_dict,
+                output_dir=str(out_dir),
+                target_pipeline="Wan2.2-T2V-A14B",
+                config={"_class_name": "WanTransformer3DModel"},
+                quantize_weight_fn=fake_quantize,
+            )
+
+            self.assertEqual(
+                result.excluded_module_patterns,
+                DEFAULT_EXCLUDED_MODULE_PATTERNS,
+            )
+            self.assertEqual(
+                result.quantized_modules,
+                ("blocks.0.attn1.to_q", "blocks.0.attn2.to_q"),
+            )
+            self.assertEqual(
+                set(result.skipped_modules),
+                {
+                    "blocks.0.attn2.to_k",
+                    "blocks.0.attn2.to_v",
+                    "condition_embedder.time_proj",
+                    "proj_out",
+                },
+            )
+
+            with open(out_dir / "config.json", "r") as f:
+                config = json.load(f)
+            self.assertEqual(
+                config["quantization_config"]["modules_to_not_convert"],
+                [
+                    "blocks.0.attn2.to_k",
+                    "blocks.0.attn2.to_v",
+                    "proj_out",
+                    "time_modulation.linear",
+                ],
+            )
+            self.assertEqual(
+                config["quantization_config"]["excluded_module_patterns"],
+                list(DEFAULT_EXCLUDED_MODULE_PATTERNS),
+            )
+
+            with safe_open(
+                str(out_dir / "diffusion_pytorch_model.safetensors"),
+                framework="pt",
+                device="cpu",
+            ) as f:
+                keys = set(f.keys())
+                self.assertIn("blocks.0.attn1.to_q.qweight", keys)
+                self.assertIn("blocks.0.attn2.to_q.qweight", keys)
+                self.assertIn("blocks.0.attn2.to_k.weight", keys)
+                self.assertIn("blocks.0.attn2.to_v.weight", keys)
+                self.assertIn("condition_embedder.time_proj.weight", keys)
+                self.assertIn("proj_out.weight", keys)
+                self.assertNotIn("blocks.0.attn2.to_k.qweight", keys)
+                self.assertNotIn("blocks.0.attn2.to_v.qweight", keys)
+                self.assertNotIn("condition_embedder.time_proj.qweight", keys)
+                self.assertNotIn("proj_out.qweight", keys)
 
     def test_export_wan_model_to_sharq_writes_transformer_pair(self):
         def fake_quantize(weight: torch.Tensor, bias: torch.Tensor | None):

@@ -10,6 +10,10 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs import sharq_conf
 from sglang.multimodal_gen.runtime.layers.quantization.configs.sharq_config import (
     SharQConfig,
 )
+from sglang.multimodal_gen.runtime.layers.linear import (
+    ReplicatedLinear,
+    UnquantizedLinearMethod,
+)
 from sglang.multimodal_gen.runtime.layers.quantization.sharq_linear import (
     SharQLinearMethod,
 )
@@ -101,6 +105,30 @@ class TestSharQConfig(unittest.TestCase):
                     pipeline_name="Wan2_2_T2V_A14B_Config",
                     tp_size=1,
                 )
+
+    def test_sharq_config_skips_ignored_linear_prefixes(self):
+        payload = _sharq_payload()
+        payload["modules_to_not_convert"] = [
+            "blocks.0.attn2.to_k",
+            "time_modulation.linear",
+        ]
+        cfg = SharQConfig.from_config(payload)
+
+        skipped_layer = ReplicatedLinear(
+            128,
+            128,
+            quant_config=cfg,
+            prefix="blocks.0.attn2.to_k",
+        )
+        quantized_layer = ReplicatedLinear(
+            128,
+            128,
+            quant_config=cfg,
+            prefix="blocks.0.attn1.to_q",
+        )
+
+        self.assertIsInstance(skipped_layer.quant_method, UnquantizedLinearMethod)
+        self.assertIsInstance(quantized_layer.quant_method, SharQLinearMethod)
 
 
 class TestSharQPrepare(unittest.TestCase):

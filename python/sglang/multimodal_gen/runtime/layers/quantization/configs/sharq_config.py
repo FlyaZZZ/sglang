@@ -18,6 +18,7 @@ from sglang.multimodal_gen.runtime.layers.quantization.sharq_ops import (
     load_sharq_ops,
 )
 from sglang.multimodal_gen.runtime.platforms import current_platform
+from sglang.srt.layers.quantization.utils import is_layer_skipped
 
 
 @lru_cache(maxsize=1)
@@ -34,11 +35,15 @@ class SharQConfig(QuantizationConfig):
     extra_fusion: bool = True
     tp_supported: bool = False
     fused_modules: list[str] = field(default_factory=list)
+    ignored_layers: list[str] = field(default_factory=list)
     weight_format: str = "sharq_w32_shared_nvfp4"
 
     def __post_init__(self) -> None:
         QuantizationConfig.__init__(self)
         self.fused_modules = list(self.fused_modules or [])
+        self.ignored_layers = [
+            layer.replace("model.", "") for layer in list(self.ignored_layers or [])
+        ]
 
     @classmethod
     def get_name(cls) -> str:
@@ -66,6 +71,9 @@ class SharQConfig(QuantizationConfig):
             extra_fusion=bool(config.get("extra_fusion", True)),
             tp_supported=bool(config.get("tp_supported", False)),
             fused_modules=list(config.get("fused_modules") or []),
+            ignored_layers=list(
+                config.get("ignored_layers") or config.get("modules_to_not_convert") or []
+            ),
             weight_format=config.get("weight_format", "sharq_w32_shared_nvfp4"),
         )
 
@@ -162,11 +170,16 @@ class SharQConfig(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> QuantizeMethodBase | None:
-        from sglang.multimodal_gen.runtime.layers.linear import LinearBase
+        from sglang.multimodal_gen.runtime.layers.linear import (
+            LinearBase,
+            UnquantizedLinearMethod,
+        )
         from sglang.multimodal_gen.runtime.layers.quantization.sharq_linear import (
             SharQLinearMethod,
         )
 
         if isinstance(layer, LinearBase):
+            if is_layer_skipped(prefix, self.ignored_layers):
+                return UnquantizedLinearMethod()
             return SharQLinearMethod(self)
         return None
